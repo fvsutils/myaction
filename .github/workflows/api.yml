@@ -1,0 +1,281 @@
+# .github/workflows/api.yml
+name: Deploy API REST
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  PORT: 3000
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. Checkout do código
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    # 2. Setup Node.js
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    # 3. Instalar dependências
+    - name: Install dependencies
+      run: npm install
+    
+    # 4. Criar tabela no banco (se não existir)
+    - name: Setup Database
+      run: |
+        npm install pg
+        node -e "
+        const { Client } = require('pg');
+        const client = new Client({ connectionString: process.env.DATABASE_URL });
+        
+        async function setup() {
+          try {
+            await client.connect();
+            console.log('Conectado ao banco Neon');
+            
+            await client.query(\`
+              CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                lastname VARCHAR(100) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+              )
+            \`);
+            
+            console.log('Tabela users criada/verificada');
+            await client.end();
+          } catch (err) {
+            console.error('Erro:', err);
+            process.exit(1);
+          }
+        }
+        setup();
+        "
+    
+    # 5. Executar testes (se existirem)
+    - name: Run tests
+      run: |
+        if [ -f "package.json" ] && grep -q "\"test\"" package.json; then
+          npm test
+        else
+          echo "Nenhum teste configurado"
+        fi
+    
+    # 6. Testar endpoints da API
+    - name: Test API endpoints
+      run: |
+        # Iniciar servidor em background
+        npm start &
+        SERVER_PID=$!
+        
+        # Aguardar servidor inicializar
+        sleep 10
+        
+        echo "Testando endpoints..."
+        
+        # Teste GET /users (deve retornar array vazio inicialmente)
+        echo "GET /users"
+        curl -f http://localhost:3000/users || exit 1
+        
+        # Teste POST /users (criar usuário)
+        echo "POST /users"
+        USER_ID=$(curl -s -X POST http://localhost:3000/users \
+          -H "Content-Type: application/json" \
+          -d '{"name":"João","lastname":"Silva","email":"joao@test.com"}' | \
+          grep -o '"id":[0-9]*' | cut -d':' -f2)
+        
+        if [ -z "$USER_ID" ]; then
+          echo "Erro ao criar usuário"
+          exit 1
+        fi
+        
+        echo "Usuário criado com ID: $USER_ID"
+        
+        # Teste GET /users/:id
+        echo "GET /users/$USER_ID"
+        curl -f http://localhost:3000/users/$USER_ID || exit 1
+        
+        # Teste PUT /users/:id
+        echo "PUT /users/$USER_ID"
+        curl -f -X PUT http://localhost:3000/users/$USER_ID \
+          -H "Content-Type: application/json" \
+          -d '{"name":"João Atualizado","lastname":"Silva Santos","email":"joao.novo@test.com"}' || exit 1
+        
+        # Teste DELETE /users/:id
+        echo "DELETE /users/$USER_ID"
+        curl -f -X DELETE http://localhost:3000/users/$USER_ID || exit 1
+        
+        # Parar servidor
+        kill $SERVER_PID
+        
+        echo "✅ Todos os testes passaram!"
+    
+    # 7. Deploy (exemplo para Railway/Heroku/Vercel)
+    - name: Deploy to Production
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "🚀 Deployando para produção..."
+        
+        # Exemplo para Railway
+        if [ ! -z "${{ secrets.RAILWAY_TOKEN }}" ]; then
+          echo "Deploy para Railway"
+          npx @railway/cli login --token ${{ secrets.RAILWAY_TOKEN }}
+          npx @railway/cli up
+        fi
+        
+        # Exemplo para Heroku
+        if [ ! -z "${{ secrets.HEROKU_API_KEY }}" ]; then
+          echo "Deploy para Heroku"
+          # Comandos do Heroku aqui
+        fi
+        
+        # Exemplo para Vercel
+        if [ ! -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+          echo "Deploy para Vercel"
+          npx vercel --token ${{ secrets.VERCEL_TOKEN }} --prod
+        fi
+    
+    # 8. Notificar sucesso
+    - name: Notify Success
+      if: success()
+      run: |
+        echo "✅ Pipeline executado com sucesso!"
+        echo "API REST deployada e funcionando"
+        
+        # Opcional: enviar notificação para Slack/Discord
+        if [ ! -z "${{ secrets.SLACK_WEBHOOK }}" ]; then
+          curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+            -H 'Content-type: application/json' \
+            --data '{
+              "text": "🚀 API REST deployada com sucesso!",
+              "channel": "#deployments"
+            }'
+        fi
+
+---
+
+# ARQUIVO ADICIONAL: package.json (crie na raiz do projeto)
+# {
+#   "name": "api-rest-users",
+#   "version": "1.0.0",
+#   "description": "API REST simples para usuários",
+#   "main": "server.js",
+#   "scripts": {
+#     "start": "node server.js",
+#     "dev": "nodemon server.js",
+#     "test": "echo \"Testes não configurados ainda\" && exit 0"
+#   },
+#   "dependencies": {
+#     "express": "^4.18.2",
+#     "pg": "^8.11.3",
+#     "cors": "^2.8.5",
+#     "dotenv": "^16.3.1"
+#   },
+#   "devDependencies": {
+#     "nodemon": "^3.0.1"
+#   }
+# }
+
+---
+
+# ARQUIVO ADICIONAL: server.js (crie na raiz do projeto)
+# const express = require('express');
+# const { Client } = require('pg');
+# const cors = require('cors');
+# 
+# const app = express();
+# const port = process.env.PORT || 3000;
+# 
+# app.use(cors());
+# app.use(express.json());
+# 
+# const client = new Client({
+#   connectionString: process.env.DATABASE_URL
+# });
+# 
+# client.connect();
+# 
+# // GET /users - Listar todos
+# app.get('/users', async (req, res) => {
+#   try {
+#     const result = await client.query('SELECT * FROM users ORDER BY id');
+#     res.json(result.rows);
+#   } catch (err) {
+#     res.status(500).json({ error: err.message });
+#   }
+# });
+# 
+# // GET /users/:id - Buscar por ID
+# app.get('/users/:id', async (req, res) => {
+#   try {
+#     const result = await client.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+#     if (result.rows.length === 0) {
+#       return res.status(404).json({ error: 'Usuário não encontrado' });
+#     }
+#     res.json(result.rows[0]);
+#   } catch (err) {
+#     res.status(500).json({ error: err.message });
+#   }
+# });
+# 
+# // POST /users - Criar usuário
+# app.post('/users', async (req, res) => {
+#   const { name, lastname, email } = req.body;
+#   try {
+#     const result = await client.query(
+#       'INSERT INTO users (name, lastname, email) VALUES ($1, $2, $3) RETURNING *',
+#       [name, lastname, email]
+#     );
+#     res.status(201).json(result.rows[0]);
+#   } catch (err) {
+#     res.status(500).json({ error: err.message });
+#   }
+# });
+# 
+# // PUT /users/:id - Atualizar usuário
+# app.put('/users/:id', async (req, res) => {
+#   const { name, lastname, email } = req.body;
+#   try {
+#     const result = await client.query(
+#       'UPDATE users SET name = $1, lastname = $2, email = $3, updated_at = NOW() WHERE id = $4 RETURNING *',
+#       [name, lastname, email, req.params.id]
+#     );
+#     if (result.rows.length === 0) {
+#       return res.status(404).json({ error: 'Usuário não encontrado' });
+#     }
+#     res.json(result.rows[0]);
+#   } catch (err) {
+#     res.status(500).json({ error: err.message });
+#   }
+# });
+# 
+# // DELETE /users/:id - Remover usuário
+# app.delete('/users/:id', async (req, res) => {
+#   try {
+#     const result = await client.query('DELETE FROM users WHERE id = $1 RETURNING *', [req.params.id]);
+#     if (result.rows.length === 0) {
+#       return res.status(404).json({ error: 'Usuário não encontrado' });
+#     }
+#     res.json({ message: 'Usuário removido com sucesso' });
+#   } catch (err) {
+#     res.status(500).json({ error: err.message });
+#   }
+# });
+# 
+# app.listen(port, () => {
+#   console.log(`API rodando na porta ${port}`);
+# });
