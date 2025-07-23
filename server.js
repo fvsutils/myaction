@@ -1,8 +1,7 @@
 const express = require('express');
-const { Client } = require('pg');
+const { Pool } = require('pg');
 const cors = require('cors');
 
-// Carregar variáveis de ambiente
 require('dotenv').config();
 
 const app = express();
@@ -11,19 +10,29 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const client = new Client({
+console.log('🔧 DATABASE_URL configurada:', !!process.env.DATABASE_URL);
+console.log('🔧 NODE_ENV:', process.env.NODE_ENV);
+
+if (!process.env.DATABASE_URL) {
+  console.error('❌ DATABASE_URL não encontrada!');
+  console.error('Variáveis disponíveis:', Object.keys(process.env).filter(key => key.includes('DATA')));
+  process.exit(1);
+}
+
+// Pool de conexões
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false  // Obrigatório para Neon
+    rejectUnauthorized: false
   }
 });
 
-async function connectDatabase() {
+// Testar conexão
+async function testConnection() {
   try {
-    await client.connect();
-    console.log('✅ Conectado ao PostgreSQL');
+    const client = await pool.connect();
+    console.log('✅ Conectado ao PostgreSQL via Pool');
     
-    // Criar tabela se não existir
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -34,26 +43,24 @@ async function connectDatabase() {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    console.log('📋 Tabela users verificada/criada');
+    
+    console.log('📋 Tabela users verificada');
+    client.release();
     
   } catch (err) {
     console.error('❌ Erro de conexão:', err.message);
-    console.error('DATABASE_URL presente:', !!process.env.DATABASE_URL);
-    console.error('Tentando reconectar em 5 segundos...');
-    
-    setTimeout(() => {
-      connectDatabase();
-    }, 5000);
+    throw err;
   }
 }
 
-// Conectar ao banco
-connectDatabase();
+// Inicializar conexão apenas uma vez
+testConnection().catch(console.error);
 
 // Rota raiz
 app.get('/', (req, res) => {
   res.json({ 
     message: 'API REST Users funcionando!', 
+    status: 'online',
     endpoints: {
       'GET /users': 'Listar usuários',
       'GET /users/:id': 'Buscar usuário por ID',
@@ -67,25 +74,25 @@ app.get('/', (req, res) => {
 // GET /users - Listar todos
 app.get('/users', async (req, res) => {
   try {
-    const result = await client.query('SELECT * FROM users ORDER BY id');
+    const result = await pool.query('SELECT * FROM users ORDER BY id');
     res.json(result.rows);
   } catch (err) {
     console.error('Erro ao listar usuários:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
 // GET /users/:id - Buscar por ID
 app.get('/users/:id', async (req, res) => {
   try {
-    const result = await client.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Erro ao buscar usuário:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -100,17 +107,17 @@ app.post('/users', async (req, res) => {
   }
   
   try {
-    const result = await client.query(
+    const result = await pool.query(
       'INSERT INTO users (name, lastname, email) VALUES ($1, $2, $3) RETURNING *',
       [name, lastname, email]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Erro ao criar usuário:', err);
-    if (err.code === '23505') { // Unique violation
+    if (err.code === '23505') {
       res.status(400).json({ error: 'Email já existe' });
     } else {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Erro interno do servidor' });
     }
   }
 });
@@ -126,7 +133,7 @@ app.put('/users/:id', async (req, res) => {
   }
   
   try {
-    const result = await client.query(
+    const result = await pool.query(
       'UPDATE users SET name = $1, lastname = $2, email = $3, updated_at = NOW() WHERE id = $4 RETURNING *',
       [name, lastname, email, req.params.id]
     );
@@ -136,10 +143,10 @@ app.put('/users/:id', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Erro ao atualizar usuário:', err);
-    if (err.code === '23505') { // Unique violation
+    if (err.code === '23505') {
       res.status(400).json({ error: 'Email já existe' });
     } else {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Erro interno do servidor' });
     }
   }
 });
@@ -147,14 +154,14 @@ app.put('/users/:id', async (req, res) => {
 // DELETE /users/:id - Remover usuário
 app.delete('/users/:id', async (req, res) => {
   try {
-    const result = await client.query('DELETE FROM users WHERE id = $1 RETURNING *', [req.params.id]);
+    const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING *', [req.params.id]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
     res.json({ message: 'Usuário removido com sucesso', user: result.rows[0] });
   } catch (err) {
     console.error('Erro ao deletar usuário:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
@@ -172,4 +179,11 @@ app.use((req, res) => {
 app.listen(port, () => {
   console.log(`🚀 API rodando na porta ${port}`);
   console.log(`📖 Documentação: http://localhost:${port}/`);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('🛑 Encerrando servidor...');
+  await pool.end();
+  process.exit(0);
 });
